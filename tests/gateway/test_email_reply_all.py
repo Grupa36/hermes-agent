@@ -1,6 +1,7 @@
 """Email Reply-All: audiences keyed by the inbound Message-ID, never by sender (#82543 / withdrawn #91721)."""
 
 import asyncio
+import email
 import os
 import smtplib
 import tempfile
@@ -21,19 +22,21 @@ ENV = {"EMAIL_ADDRESS": "Seba@Grupa36.pl", "EMAIL_PASSWORD": "secret", "EMAIL_IM
 @pytest.fixture
 def adapter():
     EmailAdapter._reply_audiences.clear()
+    EmailAdapter._thread_latest.clear()
     with patch.dict(os.environ, ENV):
         a = EmailAdapter(PlatformConfig(enabled=True))
         a.handle_message = MagicMock(side_effect=lambda event: asyncio.sleep(0))
         yield a
     EmailAdapter._reply_audiences.clear()
+    EmailAdapter._thread_latest.clear()
 
 
-def _inbound(a, message_id, to, cc="", sender="alice@test.com", subject="Plans", references="", in_reply_to=""):
+def _inbound(a, message_id, to, cc="", sender="alice@test.com", subject="Plans", references="", in_reply_to="", body="hi"):
     asyncio.run(a._dispatch_message({
         "uid": b"1", "sender_addr": sender, "sender_name": "Alice", "subject": subject, "message_id": message_id,
-        "in_reply_to": in_reply_to, "references": references, "to": [to], "cc": [cc] if cc else [], "body": "hi",
+        "in_reply_to": in_reply_to, "references": references, "to": [to], "cc": [cc] if cc else [], "body": body,
         "attachments": [], "date": "", "sender_authenticated": True, "auth_reason": "dmarc=pass"}))
-    return build_session_key(a.handle_message.call_args[0][0].source)
+    return build_session_key(a.handle_message.call_args[0][0].source) if a.handle_message.called else None
 
 
 def _sent(fn, *args, **kwargs):
@@ -131,7 +134,7 @@ def test_smtp_envelope_includes_cc(adapter):
 def test_one_session_per_mail_thread(adapter):
     key_a = _inbound(adapter, "<a@test.com>", "x@test.com")
     key_b = _inbound(adapter, "<b@test.com>", "y@test.com")
-    assert key_a != key_b and "alice@test.com" in key_a
+    assert key_a != key_b and "alice@test.com" not in key_a
     reply = _sent(adapter.send, "alice@test.com", "to A", reply_to="<a@test.com>")
     assert (reply["In-Reply-To"], reply["References"]) == ("<a@test.com>", "<a@test.com>")
     # Alice answers Seba's reply: References carries the root plus Seba's own Message-ID.
@@ -140,6 +143,62 @@ def test_one_session_per_mail_thread(adapter):
     second = _sent(adapter.send, "alice@test.com", "again", reply_to="<a2@test.com>")
     assert second["References"] == f"{chain} <a2@test.com>" and second["In-Reply-To"] == "<a2@test.com>"
     assert _inbound(adapter, "<a3@test.com>", "x@test.com", in_reply_to="<a@test.com>") == key_a  # no References
+
+
+def test_shared_thread_across_senders_and_anchor_routing(adapter):
+    root = _inbound(adapter, "<root@test.com>", "seba@grupa36.pl, bob@test.com")
+    source = adapter.handle_message.call_args[0][0].source
+    assert source.chat_type == "group" and source.user_id == "alice@test.com"
+    assert _inbound(adapter, "<bob@test.com>", "seba@grupa36.pl, carol@test.com",
+                    sender="bob@test.com", references="<root@test.com>") == root
+    assert build_session_key(adapter.handle_message.call_args[0][0].source, group_sessions_per_user=False) == (
+        build_session_key(source, group_sessions_per_user=False))
+    assert adapter.handle_message.call_args[0][0].source.user_id == "bob@test.com"
+    assert _inbound(adapter, "<other@test.com>", "seba@grupa36.pl", sender="bob@test.com") != root
+    first = _sent(adapter.send, source.chat_id, "answer", reply_to="<root@test.com>")
+    latest = _sent(adapter.send, source.chat_id, "answer")
+    assert (first["To"], first["In-Reply-To"]) == ("alice@test.com, bob@test.com", "<root@test.com>")
+    assert (latest["To"], latest["Cc"], latest["In-Reply-To"]) == (
+        "bob@test.com, carol@test.com", None, "<bob@test.com>")
+    wrong_anchor = _sent(adapter.send, source.chat_id, "answer", reply_to="<other@test.com>")
+    assert (wrong_anchor["To"], wrong_anchor["In-Reply-To"]) == (
+        "bob@test.com, carol@test.com", "<bob@test.com>")
+    assert _sent(adapter.send, "alice@test.com", "proactive")["To"] == "alice@test.com"
+    failed = asyncio.run(adapter.send("mail-unknown", "x"))
+    assert not failed.success and "Unknown email thread" in failed.error
+    assert not asyncio.run(adapter.send_document("mail-unknown", __file__)).success
+
+
+@pytest.mark.parametrize("to,cc,body,enabled,expected", [
+    ("seba@grupa36.pl", "", "hello", True, True),
+    ("alice@test.com", "seba@grupa36.pl", "hello", True, False),
+    ("alice@test.com", "seba@grupa36.pl", "@Seba, please help", True, True),
+    ("alice@test.com", "seba@grupa36.pl", "hello\nOn Monday Alice wrote:\nSeba help", True, False),
+    ("alice@test.com", "seba@grupa36.pl", "Sebastian is here", True, False),
+    ("alice@test.com", "seba@grupa36.pl", "hello", False, True),
+])
+def test_only_addressed_mail_dispatches(to, cc, body, enabled, expected):
+    EmailAdapter._reply_audiences.clear()
+    EmailAdapter._thread_latest.clear()
+    with patch.dict(os.environ, {**ENV, "EMAIL_MENTION_NAMES": "Seba" if enabled else ""}):
+        a = EmailAdapter(PlatformConfig(enabled=True))
+        a.handle_message = MagicMock(side_effect=lambda event: asyncio.sleep(0))
+        _inbound(a, "<mention@test.com>", to, cc, body=body)
+        assert a.handle_message.called is expected
+
+
+def test_html_gmail_quote_is_not_a_mention():
+    with patch.dict(os.environ, {**ENV, "EMAIL_MENTION_NAMES": "Seba"}):
+        a = EmailAdapter(PlatformConfig(enabled=True))
+        a.handle_message = MagicMock(side_effect=lambda event: asyncio.sleep(0))
+        msg = email.message_from_string(
+            'From: Alice <alice@test.com>\nTo: alice@test.com\nCc: seba@grupa36.pl\n'
+            'Message-ID: <html@test.com>\nContent-Type: text/html; charset=utf-8\n\n'
+            '<p>hello</p><div class="gmail_quote"><p>Seba help</p></div>')
+        data = a._parse_fetched_message(b"1", msg.as_bytes())
+        assert "Seba" in data["body"] and "Seba" not in data["mention_body"]
+        asyncio.run(a._dispatch_message(data))
+        assert not a.handle_message.called
 
 
 def test_mail_without_ids_keeps_the_per_sender_session(adapter):

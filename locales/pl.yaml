@@ -473,6 +473,8 @@ gateway:
 # only in en.yaml + pl.yaml (tests/agent/test_i18n.py exempts g36.* elsewhere).
 # ---------------------------------------------------------------------------
 g36:
+  email:
+    unknown_thread: "Nie znam wątku e-mail {chat_id}: nie mam zapamiętanych odbiorców żadnej wiadomości z tego wątku"
   run_busy:
     gerund_restarting:          "się restartuje"
     gerund_shutting_down:       "się wyłącza"

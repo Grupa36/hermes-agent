@@ -23,6 +23,7 @@ from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.i18n import t
 from gateway.platforms.base import (
     BasePlatformAdapter, SendResult,
     cache_document_from_bytes, cache_image_from_bytes,
@@ -351,6 +352,19 @@ def _thread_root(references: str, in_reply_to: str, message_id: str) -> Optional
     return f"mail-{hashlib.sha256(ids[0].encode()).hexdigest()[:16]}" if ids else None  # hashed: keys split on ":"
 
 
+def _new_mail_text(body: str) -> str:
+    """Conservatively stop at the first quoted reply or attribution for mention detection only."""
+    lines = []
+    for line in body.splitlines():
+        if (re.match(r"^\s*>\s?", line) or
+                re.match(r"^\s*On .+ wrote:\s*$", line, re.IGNORECASE) or
+                re.match(r"^\s*W dniu .+ pisze:\s*$", line, re.IGNORECASE) or
+                re.match(r"^\s*-{2,}\s*(?:Original Message|Forwarded message)\s*-{2,}", line, re.IGNORECASE)):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _anchor(reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     """The inbound Message-ID a send answers: explicit ``reply_to``, else the gateway's per-turn metadata anchor."""
     return reply_to or (metadata or {}).get(_REPLY_ANCHOR_KEY)
@@ -366,6 +380,7 @@ class EmailAdapter(BasePlatformAdapter):
     # Reply-All audiences keyed by the inbound Message-ID the reply answers, never by sender: one sender can have
     # several threads open (#91721). Per account and class-level so a reconnect's fresh adapter keeps them.
     _reply_audiences: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
+    _thread_latest: Dict[str, "OrderedDict[str, str]"] = {}
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
@@ -385,6 +400,7 @@ class EmailAdapter(BasePlatformAdapter):
         self._smtp_security = _normalize_security(setting("EMAIL_SMTP_SECURITY", "smtp_security"), default="tls" if self._smtp_port == 465 else "starttls")
         self._smtp_tls_verify = tls_verify("EMAIL_SMTP_TLS_VERIFY", "smtp_tls_verify")
         self._poll_interval = _esecret_int("EMAIL_POLL_INTERVAL", 15)
+        self._mention_names = [name.strip() for name in str(setting("EMAIL_MENTION_NAMES", "mention_names")).split(",") if name.strip()]
         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
@@ -403,6 +419,7 @@ class EmailAdapter(BasePlatformAdapter):
         # "the check itself failed" (#80016).
         self._thread_context: Dict[str, Dict[str, str]] = {}
         self._audiences = self._reply_audiences.setdefault(self._address.lower(), OrderedDict())
+        self._latest = self._thread_latest.setdefault(self._address.lower(), OrderedDict())
         logger.info("[Email] Adapter initialized for %s", self._address)
 
     def _trim_seen_uids(self) -> None:
@@ -613,11 +630,21 @@ class EmailAdapter(BasePlatformAdapter):
             return None
         # Verify From: while the trusted Authentication-Results header is in scope; the verdict is consumed at dispatch (GHSA-rxqh-5572-8m77).
         sender_authenticated, auth_reason = _verify_sender_authentication(msg, sender_addr, authserv_id=self._authserv_id)
+        body = _extract_text_body(msg)
+        # Gmail HTML quotes lose their class marker in _strip_html; inspect before stripping.
+        html = _first_body_part(msg, "text/html") if msg.is_multipart() else (
+            _safe_decode(msg.get_payload(decode=True) or b"", msg.get_content_charset())
+            if msg.get_content_type() == "text/html" else "")
+        if html and not _first_body_part(msg, "text/plain"):
+            html = re.split(r'<div\b[^>]*class=["\'][^"\']*\bgmail_quote\b', html, maxsplit=1, flags=re.IGNORECASE)[0]
+            mention_body = _strip_html(html)
+        else:
+            mention_body = body
         return {"uid": uid, "sender_addr": sender_addr, "sender_name": sender_name, "subject": subject,
                 "message_id": msg.get("Message-ID", ""), "in_reply_to": msg.get("In-Reply-To", ""),
                 "references": " ".join(_MSGID_RE.findall(str(msg.get("References", "")))),
                 "to": [str(v) for v in msg.get_all("To", [])], "cc": [str(v) for v in msg.get_all("Cc", [])],
-                "body": _extract_text_body(msg),
+                "body": body, "mention_body": mention_body,
                 "attachments": _extract_attachments(msg, skip_attachments=self._skip_attachments),
                 "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason}
 
@@ -706,21 +733,34 @@ class EmailAdapter(BasePlatformAdapter):
         # DOCUMENT wins over PHOTO for mixed attachments: run.py keys image handling off the per-path mime type regardless
         # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.
         kinds = {att["type"] for att in attachments}
+        thread = _thread_root(msg_data.get("references", ""), msg_data["in_reply_to"], msg_data["message_id"])
         self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"]}
         if key := (msg_data["message_id"] or "").strip():
             to, cc = _reply_all_recipients(msg_data.get("to", []), msg_data.get("cc", []), sender_addr, self._address)
             self._audiences[key] = {"sender": sender_addr, "subject": subject, "to": to, "cc": cc,
-                                    "references": msg_data.get("references", "")}
+                                    "references": msg_data.get("references", ""), "thread": thread}
+            if thread:
+                self._latest[thread] = key
+                self._latest.move_to_end(thread)
+                while len(self._latest) > _REPLY_AUDIENCES_MAX:
+                    self._latest.popitem(last=False)
             while len(self._audiences) > _REPLY_AUDIENCES_MAX:
                 self._audiences.popitem(last=False)
+        if self._mention_names:
+            in_to = self._address.lower() in {addr.strip().lower() for _, addr in getaddresses(msg_data.get("to", []))}
+            new_text = _new_mail_text(msg_data.get("mention_body", msg_data["body"]))
+            named = any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", new_text, re.IGNORECASE)
+                        for name in self._mention_names)
+            if not (in_to or named):
+                logger.info("[Email] Skipping mail from %s: not addressed to agent or mentioned in new text", sender_addr)
+                return
         name = msg_data["sender_name"] or sender_addr
         event = MessageEvent(
             text=text or "(empty email)", message_id=msg_data["message_id"],
             message_type=MessageType.DOCUMENT if "document" in kinds else MessageType.PHOTO if "image" in kinds else MessageType.TEXT,
-            source=self.build_source(chat_id=sender_addr, chat_name=name, chat_type="dm", user_id=sender_addr, user_name=name,
-                                     message_id=msg_data["message_id"],  # one session per mail thread, not per sender
-                                     thread_id=_thread_root(msg_data.get("references", ""), msg_data["in_reply_to"],
-                                                            msg_data["message_id"])),
+            source=self.build_source(chat_id=thread or sender_addr, chat_name=subject if thread else name,
+                                     chat_type="group" if thread else "dm", user_id=sender_addr, user_name=name,
+                                     message_id=msg_data["message_id"], thread_id=thread),
             media_urls=[att["path"] for att in attachments], media_types=[att["media_type"] for att in attachments],
             reply_to_message_id=msg_data["in_reply_to"] or None)
         logger.info("[Email] New message from %s: %s", sender_addr, subject)
@@ -734,9 +774,26 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error(log_fmt, *log_args, e)
             return SendResult(success=False, error=str(e))
 
+    def _resolve_recipient(self, chat_id: str, anchor: Optional[str]) -> Tuple[str, Optional[str]]:
+        """Resolve a thread route only through an inbound audience from this account."""
+        if "@" in chat_id:
+            return chat_id, anchor
+        audience = self._audiences.get((anchor or "").strip())
+        if not audience or audience.get("thread") != chat_id:
+            audience = self._audiences.get(self._latest.get(chat_id, ""))
+        if not audience or audience.get("thread") != chat_id:
+            raise ValueError(t("g36.email.unknown_thread", chat_id=chat_id))
+        # Find the selected Message-ID (the explicit anchor wins over the latest).
+        selected = anchor if self._audiences.get((anchor or "").strip()) is audience else self._latest[chat_id]
+        return audience["sender"], selected
+
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Send an email reply to the given address."""
-        return await self._run_send(self._send_email, (chat_id, content, _anchor(reply_to, metadata)),
+        """Send to an address or resolve a thread to a remembered inbound audience."""
+        try:
+            recipient, anchor = self._resolve_recipient(chat_id, _anchor(reply_to, metadata))
+        except ValueError as exc:
+            return SendResult(success=False, error=str(exc))
+        return await self._run_send(self._send_email, (recipient, content, anchor),
                                     "[Email] Send failed to %s: %s", chat_id)
 
     def _message_id_domain(self) -> str:
@@ -825,8 +882,12 @@ class EmailAdapter(BasePlatformAdapter):
         if not local_paths and not body_parts:
             return SendResult(success=False, error="no valid images in batch")
         try:
+            recipient, anchor = self._resolve_recipient(chat_id, _anchor(None, metadata))
+        except ValueError as exc:
+            return SendResult(success=False, error=str(exc))
+        try:
             message_id = await asyncio.get_running_loop().run_in_executor(
-                None, self._send_email_with_attachments, chat_id, "\n\n".join(body_parts), local_paths, _anchor(None, metadata))
+                None, self._send_email_with_attachments, recipient, "\n\n".join(body_parts), local_paths, anchor)
         except Exception as e:
             logger.error("[Email] Multi-image send failed, falling back: %s", e, exc_info=True)
             return await super().send_multiple_images(chat_id, images, metadata, human_delay)
@@ -843,8 +904,12 @@ class EmailAdapter(BasePlatformAdapter):
     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
         """Send a file as an email attachment."""
+        try:
+            recipient, anchor = self._resolve_recipient(chat_id, _anchor(reply_to, kwargs.get("metadata")))
+        except ValueError as exc:
+            return SendResult(success=False, error=str(exc))
         return await self._run_send(self._send_email_with_attachment,
-                                    (chat_id, caption or "", file_path, file_name, _anchor(reply_to, kwargs.get("metadata"))),
+                                    (recipient, caption or "", file_path, file_name, anchor),
                                     "[Email] Send document failed: %s")
 
     def _send_email_with_attachment(self, to_addr: str, body: str, file_path: str, file_name: Optional[str] = None,

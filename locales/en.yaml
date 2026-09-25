@@ -482,6 +482,8 @@ gateway:
 # only in en.yaml + pl.yaml (tests/agent/test_i18n.py exempts g36.* elsewhere).
 # ---------------------------------------------------------------------------
 g36:
+  email:
+    unknown_thread: "Unknown email thread {chat_id}: no remembered inbound audience"
   run_busy:
     gerund_restarting:          "restarting"
     gerund_shutting_down:       "shutting down"
