@@ -3,6 +3,7 @@ receives, SMTP sends. Configured via EMAIL_* env vars or ``platforms.email`` in 
 
 import asyncio
 import email as email_lib
+import hashlib
 from collections import OrderedDict
 from contextlib import contextmanager, suppress
 import imaplib
@@ -58,6 +59,7 @@ _HTML_SUBS = ((re.compile(r"<br\s*/?>", re.IGNORECASE), "\n"), (re.compile(r"<p[
               (re.compile(r"&amp;"), "&"), (re.compile(r"&lt;"), "<"), (re.compile(r"&gt;"), ">"), (re.compile(r"\n{3,}"), "\n\n"))
 # "method=result" tokens (``dmarc=pass``) and property values (``header.from=x``) in Authentication-Results.
 _AUTH_METHOD_RE = re.compile(r"\b(dmarc|dkim|spf)\s*=\s*([a-z]+)", re.IGNORECASE)
+_MSGID_RE = re.compile(r"<[^<>\s]+>")
 _AUTH_PROP_RE = re.compile(r"\b(header\.from|header\.d|smtp\.mailfrom|smtp\.from|envelope-from)\s*=\s*([^\s;]+)", re.IGNORECASE)
 
 
@@ -343,6 +345,12 @@ def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
         msg.attach(part)
 
 
+def _thread_root(references: str, in_reply_to: str, message_id: str) -> Optional[str]:
+    """Session thread id: hash of the thread's first Message-ID (References, else In-Reply-To, else own), or None."""
+    ids = _MSGID_RE.findall(references or "") or _MSGID_RE.findall(in_reply_to or "") or _MSGID_RE.findall(message_id or "")
+    return f"mail-{hashlib.sha256(ids[0].encode()).hexdigest()[:16]}" if ids else None  # hashed: keys split on ":"
+
+
 def _anchor(reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     """The inbound Message-ID a send answers: explicit ``reply_to``, else the gateway's per-turn metadata anchor."""
     return reply_to or (metadata or {}).get(_REPLY_ANCHOR_KEY)
@@ -607,6 +615,7 @@ class EmailAdapter(BasePlatformAdapter):
         sender_authenticated, auth_reason = _verify_sender_authentication(msg, sender_addr, authserv_id=self._authserv_id)
         return {"uid": uid, "sender_addr": sender_addr, "sender_name": sender_name, "subject": subject,
                 "message_id": msg.get("Message-ID", ""), "in_reply_to": msg.get("In-Reply-To", ""),
+                "references": " ".join(_MSGID_RE.findall(str(msg.get("References", "")))),
                 "to": [str(v) for v in msg.get_all("To", [])], "cc": [str(v) for v in msg.get_all("Cc", [])],
                 "body": _extract_text_body(msg),
                 "attachments": _extract_attachments(msg, skip_attachments=self._skip_attachments),
@@ -700,7 +709,8 @@ class EmailAdapter(BasePlatformAdapter):
         self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"]}
         if key := (msg_data["message_id"] or "").strip():
             to, cc = _reply_all_recipients(msg_data.get("to", []), msg_data.get("cc", []), sender_addr, self._address)
-            self._audiences[key] = {"sender": sender_addr, "subject": subject, "to": to, "cc": cc}
+            self._audiences[key] = {"sender": sender_addr, "subject": subject, "to": to, "cc": cc,
+                                    "references": msg_data.get("references", "")}
             while len(self._audiences) > _REPLY_AUDIENCES_MAX:
                 self._audiences.popitem(last=False)
         name = msg_data["sender_name"] or sender_addr
@@ -708,7 +718,9 @@ class EmailAdapter(BasePlatformAdapter):
             text=text or "(empty email)", message_id=msg_data["message_id"],
             message_type=MessageType.DOCUMENT if "document" in kinds else MessageType.PHOTO if "image" in kinds else MessageType.TEXT,
             source=self.build_source(chat_id=sender_addr, chat_name=name, chat_type="dm", user_id=sender_addr, user_name=name,
-                                     message_id=msg_data["message_id"]),
+                                     message_id=msg_data["message_id"],  # one session per mail thread, not per sender
+                                     thread_id=_thread_root(msg_data.get("references", ""), msg_data["in_reply_to"],
+                                                            msg_data["message_id"])),
             media_urls=[att["path"] for att in attachments], media_types=[att["media_type"] for att in attachments],
             reply_to_message_id=msg_data["in_reply_to"] or None)
         logger.info("[Email] New message from %s: %s", sender_addr, subject)
@@ -743,7 +755,8 @@ class EmailAdapter(BasePlatformAdapter):
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
         original_msg_id = reply_to_msg_id or ctx.get("message_id")
-        threading = (("In-Reply-To", original_msg_id), ("References", original_msg_id)) if original_msg_id else ()
+        references = " ".join(filter(None, (audience.get("references") if audience else "", original_msg_id)))
+        threading = (("In-Reply-To", original_msg_id), ("References", references)) if original_msg_id else ()
         msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
         cc = (("Cc", ", ".join(audience["cc"])),) if audience and audience["cc"] else ()
         for key, value in (("From", self._address), ("To", ", ".join(audience["to"]) if audience else to_addr), *cc,

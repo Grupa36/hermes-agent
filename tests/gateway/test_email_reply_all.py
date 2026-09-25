@@ -11,6 +11,7 @@ import pytest
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import _thread_metadata_for_source
+from gateway.session import build_session_key
 from plugins.platforms.email.adapter import EmailAdapter, _reply_all_recipients
 
 ENV = {"EMAIL_ADDRESS": "Seba@Grupa36.pl", "EMAIL_PASSWORD": "secret", "EMAIL_IMAP_HOST": "imap.test.com",
@@ -27,11 +28,12 @@ def adapter():
     EmailAdapter._reply_audiences.clear()
 
 
-def _inbound(a, message_id, to, cc="", sender="alice@test.com", subject="Plans"):
+def _inbound(a, message_id, to, cc="", sender="alice@test.com", subject="Plans", references="", in_reply_to=""):
     asyncio.run(a._dispatch_message({
         "uid": b"1", "sender_addr": sender, "sender_name": "Alice", "subject": subject, "message_id": message_id,
-        "in_reply_to": "", "to": [to], "cc": [cc] if cc else [], "body": "hi", "attachments": [], "date": "",
-        "sender_authenticated": True, "auth_reason": "dmarc=pass"}))
+        "in_reply_to": in_reply_to, "references": references, "to": [to], "cc": [cc] if cc else [], "body": "hi",
+        "attachments": [], "date": "", "sender_authenticated": True, "auth_reason": "dmarc=pass"}))
+    return build_session_key(a.handle_message.call_args[0][0].source)
 
 
 def _sent(fn, *args, **kwargs):
@@ -124,3 +126,23 @@ def test_smtp_envelope_includes_cc(adapter):
     conn.has_extn.return_value = False
     smtplib.SMTP.send_message(conn, msg)
     assert conn.sendmail.call_args[0][1] == ["alice@test.com", "bob@test.com", "carol@test.com"]
+
+
+def test_one_session_per_mail_thread(adapter):
+    key_a = _inbound(adapter, "<a@test.com>", "x@test.com")
+    key_b = _inbound(adapter, "<b@test.com>", "y@test.com")
+    assert key_a != key_b and "alice@test.com" in key_a
+    reply = _sent(adapter.send, "alice@test.com", "to A", reply_to="<a@test.com>")
+    assert (reply["In-Reply-To"], reply["References"]) == ("<a@test.com>", "<a@test.com>")
+    # Alice answers Seba's reply: References carries the root plus Seba's own Message-ID.
+    chain = f"<a@test.com> {reply['Message-ID']}"
+    assert _inbound(adapter, "<a2@test.com>", "x@test.com", references=chain, in_reply_to=reply["Message-ID"]) == key_a
+    second = _sent(adapter.send, "alice@test.com", "again", reply_to="<a2@test.com>")
+    assert second["References"] == f"{chain} <a2@test.com>" and second["In-Reply-To"] == "<a2@test.com>"
+    assert _inbound(adapter, "<a3@test.com>", "x@test.com", in_reply_to="<a@test.com>") == key_a  # no References
+
+
+def test_mail_without_ids_keeps_the_per_sender_session(adapter):
+    _inbound(adapter, "", "x@test.com")
+    assert adapter.handle_message.call_args[0][0].source.thread_id is None
+    assert _sent(adapter.send, "alice@test.com", "x", reply_to="<unknown@test.com>")["References"] == "<unknown@test.com>"
