@@ -41,6 +41,8 @@ def _flatten(d, prefix="") -> dict:
 def test_catalog_keys_match_english(lang: str):
     """Every non-English catalog must have exactly the same key set as English."""
     en_keys = set(_flatten(_load_raw("en")).keys())
+    if lang != "pl":  # fork: g36.* keys (Grupa36 fork) exist only in en + pl
+        en_keys = {k for k in en_keys if not k.startswith("g36.")}
     lang_keys = set(_flatten(_load_raw(lang)).keys())
     missing = en_keys - lang_keys
     extra = lang_keys - en_keys
@@ -61,6 +63,8 @@ def test_catalog_placeholders_match_english(lang: str):
     en_flat = _flatten(_load_raw("en"))
     lang_flat = _flatten(_load_raw(lang))
     for key, en_value in en_flat.items():
+        if key.startswith("g36.") and lang not in ("en", "pl"):
+            continue  # fork: g36.* keys exist only in en + pl
         en_placeholders = set(placeholder_re.findall(en_value))
         lang_value = lang_flat.get(key, "")
         lang_placeholders = set(placeholder_re.findall(lang_value))
