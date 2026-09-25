@@ -123,6 +123,9 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     scope_id = getattr(source, "scope_id", None) if platform == "slack" else None
     if scope_id:
         metadata["slack_team_id"] = str(scope_id)
+    # Email keys its Reply-All audience on the inbound Message-ID; media sends get only metadata, not reply_to.
+    if platform == "email" and (anchor := reply_to_message_id or getattr(source, "message_id", None)):
+        metadata["email_reply_to_message_id"] = str(anchor)
     if not metadata:
         return None
     if platform == "telegram" and getattr(source, "chat_type", None) == "dm":

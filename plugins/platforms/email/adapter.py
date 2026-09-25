@@ -3,6 +3,7 @@ receives, SMTP sends. Configured via EMAIL_* env vars or ``platforms.email`` in 
 
 import asyncio
 import email as email_lib
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
 import imaplib
 import logging
@@ -16,7 +17,7 @@ from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
-from email.utils import formatdate
+from email.utils import formatdate, getaddresses
 from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +45,8 @@ MAX_MESSAGE_LENGTH = 50_000  # Gmail-safe max length per email body
 SMTP_CONNECT_TIMEOUT = 30
 _TRUTHY = {"true", "1", "yes"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+_REPLY_AUDIENCES_MAX = 2000  # remembered inbound Message-IDs per account (FIFO)
+_REPLY_ANCHOR_KEY = "email_reply_to_message_id"  # set by gateway.platforms.base._thread_metadata_for_source
 # Charset labels seen in the wild that Python's codec registry doesn't know: "unknown-8bit"/"x-unknown" are
 # RFC 1428 placeholders (QQ Mail emits them); gb2312/gbk map to the gb18030 superset so GBK extensions decode.
 _CHARSET_ALIASES = {"unknown-8bit": "utf-8", "unknown": "utf-8", "x-unknown": "utf-8", "default": "utf-8",
@@ -248,6 +251,19 @@ def _extract_email_address(raw: str) -> str:
     return (match.group(1) if match else raw).strip().lower()
 
 
+def _reply_all_recipients(to_headers: List[str], cc_headers: List[str], sender_addr: str,
+                          agent_addr: str) -> Tuple[List[str], List[str]]:
+    """Reply-All ``(to, cc)``: sender first in To, original To/Cc kept in place, self dropped, deduped case-insensitively."""
+    seen, to, cc = {agent_addr.strip().lower()}, [], []
+    for target, addrs in ((to, [sender_addr]), (to, [a for _, a in getaddresses(to_headers)]),
+                          (cc, [a for _, a in getaddresses(cc_headers)])):
+        for addr in addrs:
+            if "@" in (key := addr.strip().lower()) and key not in seen:
+                seen.add(key)
+                target.append(addr.strip())
+    return to, cc
+
+
 def _domain_of(address: str) -> str:
     """Lowercased domain part of an email address, or ''."""
     return address.rpartition("@")[2].strip().lower()
@@ -327,6 +343,11 @@ def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
         msg.attach(part)
 
 
+def _anchor(reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The inbound Message-ID a send answers: explicit ``reply_to``, else the gateway's per-turn metadata anchor."""
+    return reply_to or (metadata or {}).get(_REPLY_ANCHOR_KEY)
+
+
 class EmailAdapter(BasePlatformAdapter):
     """Email gateway adapter using IMAP (receive) and SMTP (send)."""
 
@@ -334,6 +355,9 @@ class EmailAdapter(BasePlatformAdapter):
     # adapter per retry; without this connect(is_reconnect=True) would re-mark the mailbox seen and skip
     # mail that arrived during the outage. Keyed by address (multiplex runs several accounts); same-process only.
     _seen_uids_snapshot: Dict[str, set] = {}
+    # Reply-All audiences keyed by the inbound Message-ID the reply answers, never by sender: one sender can have
+    # several threads open (#91721). Per account and class-level so a reconnect's fresh adapter keeps them.
+    _reply_audiences: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
@@ -370,6 +394,7 @@ class EmailAdapter(BasePlatformAdapter):
         # Track the last IMAP fetch attempt so the poll loop can distinguish "checked, nothing new" from
         # "the check itself failed" (#80016).
         self._thread_context: Dict[str, Dict[str, str]] = {}
+        self._audiences = self._reply_audiences.setdefault(self._address.lower(), OrderedDict())
         logger.info("[Email] Adapter initialized for %s", self._address)
 
     def _trim_seen_uids(self) -> None:
@@ -582,6 +607,7 @@ class EmailAdapter(BasePlatformAdapter):
         sender_authenticated, auth_reason = _verify_sender_authentication(msg, sender_addr, authserv_id=self._authserv_id)
         return {"uid": uid, "sender_addr": sender_addr, "sender_name": sender_name, "subject": subject,
                 "message_id": msg.get("Message-ID", ""), "in_reply_to": msg.get("In-Reply-To", ""),
+                "to": [str(v) for v in msg.get_all("To", [])], "cc": [str(v) for v in msg.get_all("Cc", [])],
                 "body": _extract_text_body(msg),
                 "attachments": _extract_attachments(msg, skip_attachments=self._skip_attachments),
                 "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason}
@@ -672,6 +698,11 @@ class EmailAdapter(BasePlatformAdapter):
         # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.
         kinds = {att["type"] for att in attachments}
         self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"]}
+        if key := (msg_data["message_id"] or "").strip():
+            to, cc = _reply_all_recipients(msg_data.get("to", []), msg_data.get("cc", []), sender_addr, self._address)
+            self._audiences[key] = {"sender": sender_addr, "subject": subject, "to": to, "cc": cc}
+            while len(self._audiences) > _REPLY_AUDIENCES_MAX:
+                self._audiences.popitem(last=False)
         name = msg_data["sender_name"] or sender_addr
         event = MessageEvent(
             text=text or "(empty email)", message_id=msg_data["message_id"],
@@ -693,7 +724,8 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send an email reply to the given address."""
-        return await self._run_send(self._send_email, (chat_id, content, reply_to), "[Email] Send failed to %s: %s", chat_id)
+        return await self._run_send(self._send_email, (chat_id, content, _anchor(reply_to, metadata)),
+                                    "[Email] Send failed to %s: %s", chat_id)
 
     def _message_id_domain(self) -> str:
         """Domain for generated Message-IDs; ``localhost`` when EMAIL_ADDRESS lacks ``@``."""
@@ -701,15 +733,21 @@ class EmailAdapter(BasePlatformAdapter):
 
     def _new_reply(self, to_addr: str, body: str, reply_to_msg_id: Optional[str] = None, *,
                    attach_empty_body: bool = False) -> Tuple[MIMEMultipart, str, str]:
-        """Build a threaded reply skeleton. Returns ``(msg, msg_id, subject)``."""
-        msg, ctx = MIMEMultipart(), self._thread_context.get(to_addr, {})
+        """Build a threaded reply skeleton. Returns ``(msg, msg_id, subject)``. Reply-All only when *reply_to_msg_id*
+        names a remembered inbound mail from *to_addr*; otherwise (unknown id, restart, proactive) sender only."""
+        audience = self._audiences.get((reply_to_msg_id or "").strip())
+        if audience and audience["sender"] != to_addr.strip().lower():
+            audience = None
+        msg, ctx = MIMEMultipart(), audience or self._thread_context.get(to_addr, {})
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
         original_msg_id = reply_to_msg_id or ctx.get("message_id")
         threading = (("In-Reply-To", original_msg_id), ("References", original_msg_id)) if original_msg_id else ()
         msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
-        for key, value in (("From", self._address), ("To", to_addr), ("Subject", subject), *threading,
+        cc = (("Cc", ", ".join(audience["cc"])),) if audience and audience["cc"] else ()
+        for key, value in (("From", self._address), ("To", ", ".join(audience["to"]) if audience else to_addr), *cc,
+                           ("Subject", subject), *threading,
                            ("Date", formatdate(localtime=True)), ("Message-ID", msg_id)):
             msg[key] = value
         if body or attach_empty_body:
@@ -753,7 +791,7 @@ class EmailAdapter(BasePlatformAdapter):
     async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None,
                          reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send an image URL as part of an email body (``metadata`` unused)."""
-        return await self.send(chat_id, f"{caption or ''}\n\nImage: {image_url}".strip(), reply_to)
+        return await self.send(chat_id, f"{caption or ''}\n\nImage: {image_url}".strip(), reply_to, metadata)
 
     async def send_multiple_images(self, chat_id: str, images: List[Tuple[str, str]],
                                    metadata: Optional[Dict[str, Any]] = None, human_delay: float = 0.0) -> SendResult:
@@ -774,22 +812,26 @@ class EmailAdapter(BasePlatformAdapter):
         if not local_paths and not body_parts:
             return SendResult(success=False, error="no valid images in batch")
         try:
-            message_id = await asyncio.get_running_loop().run_in_executor(None, self._send_email_with_attachments, chat_id, "\n\n".join(body_parts), local_paths)
+            message_id = await asyncio.get_running_loop().run_in_executor(
+                None, self._send_email_with_attachments, chat_id, "\n\n".join(body_parts), local_paths, _anchor(None, metadata))
         except Exception as e:
             logger.error("[Email] Multi-image send failed, falling back: %s", e, exc_info=True)
             return await super().send_multiple_images(chat_id, images, metadata, human_delay)
         return SendResult(success=True, message_id=message_id)
 
-    def _send_email_with_attachments(self, to_addr: str, body: str, file_paths: List[str]) -> str:
+    def _send_email_with_attachments(self, to_addr: str, body: str, file_paths: List[str],
+                                     reply_to_msg_id: Optional[str] = None) -> str:
         """Send an email with multiple file attachments via SMTP (unattachable files are skipped)."""
-        msg_id = self._send_with_files(to_addr, body, [(Path(f), Path(f).name) for f in file_paths], lenient=True)
+        msg_id = self._send_with_files(to_addr, body, [(Path(f), Path(f).name) for f in file_paths], lenient=True,
+                                       reply_to_msg_id=reply_to_msg_id)
         logger.info("[Email] Sent multi-attachment email to %s (%d files)", to_addr, len(file_paths))
         return msg_id
 
     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
         """Send a file as an email attachment."""
-        return await self._run_send(self._send_email_with_attachment, (chat_id, caption or "", file_path, file_name, reply_to),
+        return await self._run_send(self._send_email_with_attachment,
+                                    (chat_id, caption or "", file_path, file_name, _anchor(reply_to, kwargs.get("metadata"))),
                                     "[Email] Send document failed: %s")
 
     def _send_email_with_attachment(self, to_addr: str, body: str, file_path: str, file_name: Optional[str] = None,

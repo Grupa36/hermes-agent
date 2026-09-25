@@ -401,9 +401,9 @@ class TestEmailMultiImage:
             _run(adapter.send_multiple_images("user@example.com", images))
 
         mock_send.assert_called_once()
-        to_addr, body, file_paths = mock_send.call_args.args
+        to_addr, body, file_paths, reply_to = mock_send.call_args.args
         assert to_addr == "user@example.com"
-        assert len(file_paths) == 3
+        assert len(file_paths) == 3 and reply_to is None
         assert "alt 0" in body
 
 
