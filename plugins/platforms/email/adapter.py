@@ -352,14 +352,19 @@ def _thread_root(references: str, in_reply_to: str, message_id: str) -> Optional
     return f"mail-{hashlib.sha256(ids[0].encode()).hexdigest()[:16]}" if ids else None  # hashed: keys split on ":"
 
 
+# Where quoted history starts: "> " lines, attributions (Gmail's "On <date> …" / "W dniu <date> …" may wrap, so its
+# first line or any line ending "wrote:"/"napisał(a):"), Outlook header blocks ("From:"/"Od:"), separator lines.
+_QUOTE_START_RE = re.compile(
+    r"^\s*(?:>|(?:On|W dniu)\s.*\b\d{4}\b.*|.*\b(?:wrote|napisał\(a\)|napisał|napisała|pisze):\s*$|(?:From|Od):\s|"
+    r"-{2,}\s*(?:Original Message|Forwarded message|Wiadomość oryginalna|Przekazana wiadomość)\s*-{2,})",
+    re.IGNORECASE)
+
+
 def _new_mail_text(body: str) -> str:
     """Conservatively stop at the first quoted reply or attribution for mention detection only."""
     lines = []
     for line in body.splitlines():
-        if (re.match(r"^\s*>\s?", line) or
-                re.match(r"^\s*On .+ wrote:\s*$", line, re.IGNORECASE) or
-                re.match(r"^\s*W dniu .+ pisze:\s*$", line, re.IGNORECASE) or
-                re.match(r"^\s*-{2,}\s*(?:Original Message|Forwarded message)\s*-{2,}", line, re.IGNORECASE)):
+        if _QUOTE_START_RE.match(line):
             break
         lines.append(line)
     return "\n".join(lines)

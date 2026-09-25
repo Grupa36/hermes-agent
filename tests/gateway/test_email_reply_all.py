@@ -205,3 +205,15 @@ def test_mail_without_ids_keeps_the_per_sender_session(adapter):
     _inbound(adapter, "", "x@test.com")
     assert adapter.handle_message.call_args[0][0].source.thread_id is None
     assert _sent(adapter.send, "alice@test.com", "x", reply_to="<unknown@test.com>")["References"] == "<unknown@test.com>"
+
+
+@pytest.mark.parametrize(("body", "new_text"), [
+    ("Seba, zerknij\n\nW dniu pt., 25.09.2026 o 12:00 Jan <j@corp.example>\nnapisał(a):\n> Seba cos", "Seba, zerknij"),
+    ("hej\nOn Fri, Sep 25, 2026 at 12:00 PM Seba <s@corp.example> wrote:\n> x", "hej"),
+    ("On second thought, Seba check it", "On second thought, Seba check it"),
+    ("ok\n\nOd: Seba <s@corp.example>\nWysłano: pt.", "ok"),
+    ("Jan napisał(a):\n> Seba", ""),
+])
+def test_new_mail_text_stops_at_quoted_history(body, new_text):
+    from plugins.platforms.email.adapter import _new_mail_text
+    assert _new_mail_text(body).strip() == new_text
