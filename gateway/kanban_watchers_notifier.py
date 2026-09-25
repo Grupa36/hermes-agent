@@ -384,7 +384,7 @@ def _fmt_completed(ev, n) -> tuple:
     elif n.task and n.task.result:
         wake_handoff = _first_line(n.task.result, 160)
     handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
-    return f"✔ {n.head} done — {n.title}{handoff}", wake_handoff, None
+    return t("g36.kanban_watchers_notifier.completed", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 
 
 def _fmt_review_requested(ev, n) -> tuple:
@@ -397,7 +397,7 @@ def _fmt_review_requested(ev, n) -> tuple:
         summary = str(summary)
         handoff = f"\n{summary[:200]}"
         wake_handoff = _first_line(summary, 200)
-    return f"👀 {n.head} ready for review — {n.title}{handoff}", wake_handoff, None
+    return t("g36.kanban_watchers_notifier.review_requested", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 
 
 def _fmt_changes_requested(ev, n) -> tuple:
@@ -405,11 +405,12 @@ def _fmt_changes_requested(ev, n) -> tuple:
     reason = _safe_review_reason(payload.get("reason"))
     reviewer = _safe_review_reason(payload.get("reviewer"), 48)
     implementer = _safe_review_reason(payload.get("implementer"), 48)
-    reason_text = reason or "reviewer feedback requires changes"
-    provenance = f" — reviewer @{reviewer}" if reviewer else ""
+    reason_text = reason or t("g36.kanban_watchers_notifier.changes_default_reason")
+    provenance = t("g36.kanban_watchers_notifier.changes_reviewer", reviewer=reviewer) if reviewer else ""
     if implementer:
-        provenance += f" → implementer @{implementer}"
-    msg = f"🛑 {n.board_tag}Kanban {n.task_id} review requested changes/BLOCK: {reason_text}{provenance}"
+        provenance += t("g36.kanban_watchers_notifier.changes_implementer", implementer=implementer)
+    msg = t("g36.kanban_watchers_notifier.changes_requested", board_tag=n.board_tag, task_id=n.task_id,
+            reason=reason_text, provenance=provenance)
     return msg, None, reason_text
 
 
@@ -425,10 +426,11 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
     """
     kind = _payload(ev, "kind")
     decision = kind == "needs_input"
-    msg = (
-        f"🛑 {n.head} routed to TRIAGE — "
-        f"{'needs a human decision' if decision else 'for orchestration attention'}"
-        f"{_clip(ev, 'recurrences', ' (blocked {}x for the same cause)', 200)}{_clip(ev, 'reason', ': {}', 160)}"
+    msg = t(
+        "g36.kanban_watchers_notifier.triage", head=n.head,
+        why=t("g36.kanban_watchers_notifier.triage_decision" if decision else "g36.kanban_watchers_notifier.triage_orchestration"),
+        recurrences=_clip(ev, 'recurrences', t("g36.kanban_watchers_notifier.triage_recurrences"), 200),
+        reason=_clip(ev, 'reason', ': {}', 160),
     )
     return msg, None, None
 
@@ -437,11 +439,10 @@ def _fmt_gave_up(ev, n) -> tuple:
     # The dispatcher auto-blocked the task after ``failures`` consecutive non-success attempts
     # (spawn failure, crash, or timeout alike): it is now Blocked and waiting for a human.
     failures = _payload(ev, "failures")
-    count = f"it failed {int(failures)} times in a row" if failures else "it kept failing"
-    last = _clip(ev, "error", " (last: {})", 160)
+    count = t("g36.kanban_watchers_notifier.gave_up_count", count=int(failures)) if failures else t("g36.kanban_watchers_notifier.gave_up_kept_failing")
+    last = _clip(ev, "error", t("g36.kanban_watchers_notifier.gave_up_last"), 160)
     return (
-        f"⛔ {n.head} is now blocked: {count}{last}. Fix the cause, then `hermes kanban unblock "
-        f"{n.task_id}` (or `hermes kanban reassign {n.task_id}`). Logs: `hermes kanban log {n.task_id}`.",
+        t("g36.kanban_watchers_notifier.gave_up", head=n.head, count=count, last=last, task_id=n.task_id),
         None, None,
     )
 
@@ -449,8 +450,8 @@ def _fmt_gave_up(ev, n) -> tuple:
 def _fmt_timed_out(ev, n) -> tuple:
     limit = int(_payload(ev, "limit_seconds") or 0)
     minutes = max(1, round(limit / 60)) if limit else 0
-    span = f"its {minutes}-minute limit" if minutes else "its time limit"
-    return f"⏱ {n.head} ran past {span} and was stopped; it will be retried automatically.", None, None
+    span = t("g36.kanban_watchers_notifier.timed_out_minutes", minutes=minutes) if minutes else t("g36.kanban_watchers_notifier.timed_out_limit")
+    return t("g36.kanban_watchers_notifier.timed_out", head=n.head, span=span), None, None
 
 
 # archived / unblocked are claimed (so the cursor advances past them) but
@@ -458,10 +459,10 @@ def _fmt_timed_out(ev, n) -> tuple:
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "completed": _fmt_completed,
-    "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None),
+    "blocked": lambda ev, n: (t("g36.kanban_watchers_notifier.blocked", head=n.head, reason=_clip(ev, 'reason', ': {}', 160)), None, None),
     "gave_up": _fmt_gave_up,
     "crashed": lambda ev, n: (
-        f"✖ {n.head} — its worker stopped unexpectedly; it will be retried automatically.", None, None,
+        t("g36.kanban_watchers_notifier.crashed", head=n.head), None, None,
     ),
     "timed_out": _fmt_timed_out,
     "status": lambda ev, n: (f"🔄 {n.head} → {_payload(ev, 'status') or ''}", None, None),

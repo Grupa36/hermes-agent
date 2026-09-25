@@ -139,7 +139,8 @@ class GatewayVoiceMixin:
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         adapter = self._delivery_adapter_for(event.source)
         if not hasattr(adapter, "join_voice_channel"):
-            return "Voice channels are not supported on this platform."
+            from agent.i18n import t
+            return t("g36.run_voice.channels_unsupported")
         guild_id = self._get_guild_id(event)
         if not guild_id:
             return "This command only works in a Discord server."

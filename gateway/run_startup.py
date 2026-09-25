@@ -426,7 +426,7 @@ class GatewayStartupMixin:
         # No early return on an empty claim: the boot sweep may have ADOPTED flood-refused rows that are
         # not due yet, and those still need their timer armed below.
         try:
-            from gateway.delivery_ledger import RECOVERED_MARKER, mark_delivered, mark_failed
+            from gateway.delivery_ledger import RECOVERED_MARKER, localized_marker, mark_delivered, mark_failed
         except Exception:
             logger.debug("delivery ledger import failed", exc_info=True)
             return 0
@@ -441,7 +441,7 @@ class GatewayStartupMixin:
                 continue
             content = row["content"]
             if row.get("needs_marker"):
-                content = row.get("marker", RECOVERED_MARKER) + content
+                content = localized_marker(row.get("marker", RECOVERED_MARKER)) + content
             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
             try:
                 result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
@@ -785,7 +785,8 @@ class GatewayStartupMixin:
                 if diagnostic_turn_muted(prompt.get("display_metadata"), origin.platform):
                     return ""
         if is_intentional_silence_response(last["content"]):
-            return "" if machinery else _UNEXPECTED_SILENCE_REPLY
+            from agent.i18n import t
+            return "" if machinery else t("g36.run_turn.unexpected_silence")
         return _strip_media_directives(_sanitize_gateway_final_response(origin.platform, last["content"])).strip() or None
 
     @staticmethod

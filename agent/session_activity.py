@@ -56,9 +56,10 @@ def format_iteration_progress(api_call_count: Any, max_iterations: Any) -> str:
         cap = int(max_iterations)
     except (TypeError, ValueError):
         cap = sys.maxsize
+    from agent.i18n import t
     if cap >= sys.maxsize:
-        return f"iteration {api_call_count}"
-    return f"iteration {api_call_count}/{cap}"
+        return t("g36.session_activity.iteration", count=api_call_count)
+    return t("g36.session_activity.iteration_capped", count=api_call_count, cap=cap)
 
 
 def reset_session_activity_persist_window(agent: Any) -> None:

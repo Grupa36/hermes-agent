@@ -115,6 +115,9 @@ def resolve_status_phrase_catalog(user_config: Mapping[str, Any] | None,
     ``display.status_phrases`` (or legacy alias ``generic_status_phrases``), then
     ``display.platforms.<platform>.status_phrases``."""
     catalog = _copy_catalog(_DEFAULT_PHRASES)
+    from agent.i18n import get_language  # fork: localized built-ins, e.g. assets/status_phrases.pl.yaml
+    _merge_phrase_file(catalog, Path(__file__).resolve().parent / "assets" / f"status_phrases.{get_language()}.yaml",
+                       inherited_mode="replace")
     hermes_home = get_hermes_home()
     _merge_phrase_paths(catalog, list(_CONVENTIONAL_RELATIVE_PATHS), base_dir=hermes_home)
     display = (user_config or {}).get("display") if isinstance(user_config, Mapping) else None

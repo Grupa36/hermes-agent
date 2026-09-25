@@ -48,6 +48,16 @@ RECONNECTED_MARKER = ("♻️ Recovered reply — the messaging platform reconne
 # of the markers above tells the truth here (no restart, no reconnect): the rate limit gets its own.
 FLOOD_MARKER = ("♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
                 "it may already have arrived above:\n\n")
+# fork: the markers above stay English (stored in rows / matched as prefixes); localized only at send time.
+_MARKER_I18N_KEYS = {RECOVERED_MARKER: "g36.delivery_ledger.recovered",
+                     RECONNECTED_MARKER: "g36.delivery_ledger.reconnected", FLOOD_MARKER: "g36.delivery_ledger.flood"}
+
+
+def localized_marker(marker: str) -> str:
+    """``marker`` in the active display language (unknown markers pass through unchanged)."""
+    from agent.i18n import t
+    key = _MARKER_I18N_KEYS.get(marker)
+    return t(key) if key else marker
 
 # Errors whose send contract proves the platform never saw the request: retried as soon as the adapter
 # is back, no backoff. Every other rejection is retried too (#91653: a 5xx or a transient parse error

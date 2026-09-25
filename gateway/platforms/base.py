@@ -183,7 +183,9 @@ def _reply_anchor_for_event(event) -> str | None:
 def _media_failure_text(kind: str, file_name: "str | None" = None) -> str:
     """User-facing "couldn't deliver" notice; ``file_name`` is the only name ever shown."""
     suffix = f" ({file_name})" if file_name else ""
-    return f"⚠️ Couldn't deliver the {kind} attachment{suffix}."
+    kind = {"audio": t("g36.platform_base.media_kind_audio"), "video": t("g36.platform_base.media_kind_video"),
+            "file": t("g36.platform_base.media_kind_file"), "image": t("g36.platform_base.media_kind_image")}.get(kind, kind)
+    return t("g36.platform_base.media_failure", kind=kind, suffix=suffix)
 
 
 def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bool:
@@ -423,6 +425,8 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
 from gateway.platforms.base_exec_approval import (
     EA_HEADER_TEXT, EA_REASON_LABEL_TEXT, approval_timeout_seconds, format_approval_deadline_line)
+from gateway.platforms.base_exec_approval import ea_header_text, ea_reason_label_text
+from agent.i18n import t
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.warning_notifications import diagnostic_wake_muted
 from gateway.session import SessionSource, build_session_key
@@ -489,7 +493,7 @@ UNAUTHORIZED_ACTION_NOTICE = (
 def unauthorized_action_notice(platform: Any) -> str:
     """``UNAUTHORIZED_ACTION_NOTICE`` for a ``Platform`` member or its string name."""
     name = getattr(platform, "value", platform)
-    return UNAUTHORIZED_ACTION_NOTICE.format(platform=str(name or "<platform>"))
+    return t("g36.platform_base.unauthorized_action", platform=str(name or "<platform>"))
 
 
 def safe_url_for_log(url: str, max_len: int = 80) -> str:
@@ -2722,12 +2726,12 @@ class BasePlatformAdapter(ABC):
     # ── ``_format_exec_approval`` templates; adapters override only the MARKUP (bold, HTML,
     # fences) — the words come from ``gateway.platforms.base_exec_approval`` so every surface
     # says the same thing.
-    _EA_HEADER: str = f"⚠️ {EA_HEADER_TEXT}\n\n"
+    _EA_HEADER: str = property(lambda self: f"⚠️ {ea_header_text()}\n\n")
     _EA_CODE_OPEN: str = "```\n"
     _EA_CODE_CLOSE: str = "\n```\n"
-    _EA_REASON_LABEL: str = f"{EA_REASON_LABEL_TEXT}: "
+    _EA_REASON_LABEL: str = property(lambda self: f"{ea_reason_label_text()}: ")
     _EA_DEADLINE_PREFIX: str = "\n\n"  # separates the deadline line from the reason line
-    _EA_SMART_DENY_LINE: str = "\n\nSmart DENY: owner override applies to this one operation only."
+    _EA_SMART_DENY_LINE: str = property(lambda self: t("g36.platform_base.ea_smart_deny_line"))
     _EA_CMD_BUDGET: int = 3000
     _EA_REASON_BUDGET: int = 0  # 0 = the reason is never truncated
 
@@ -2785,8 +2789,9 @@ class BasePlatformAdapter(ABC):
 
     # ── Exec-approval prompt (template method). The choice set is one rule for every button
     # surface — three separate "same fix × N adapters" commits motivated lifting it here.
-    _EA_ACTION_LABELS: Dict[str, str] = {
-        "once": "Allow Once", "session": "Allow Session", "always": "Always Allow", "deny": "Deny"}
+    _EA_ACTION_LABELS: Dict[str, str] = property(lambda self: {
+        "once": t("g36.platform_base.ea_allow_once"), "session": t("g36.platform_base.ea_allow_session"),
+        "always": t("g36.platform_base.ea_always_allow"), "deny": t("g36.platform_base.ea_deny")})
     _EA_ACTION_STYLES: Dict[str, str] = {"once": "primary", "deny": "danger"}
 
     def _exec_approval_actions(
@@ -2871,10 +2876,9 @@ class BasePlatformAdapter(ABC):
                     _is_multi = bool(getattr(_cg._entries.get(clarify_id), "multi_select", False))
             except Exception:
                 _is_multi = False
-            hint = "Reply with the number, the option text, or your own answer."
+            hint = t("g36.platform_base.clarify_hint")
             if _is_multi:
-                hint = ("Multiple selections allowed — reply with the numbers separated by commas "
-                        "or spaces (e.g. \"1, 3\"), the option text, or your own answer.")
+                hint = (t("g36.platform_base.clarify_hint_multi"))
             numbered = [f"  {i}. {choice}" for i, choice in enumerate(choices, start=1)]
             text = "\n".join([f"❓ {question}", "", *numbered, "", hint])
             # Text fallback: let the gateway intercept capture the typed reply.
@@ -3665,8 +3669,7 @@ class BasePlatformAdapter(ABC):
                 logger.error("[%s] Failed to deliver response after %d retries: %s", self.name, max_retries, error_str)
                 # Not a diagnostic: the requested result itself was lost and this is its only signal.
                 notice = (
-                    "\u26a0\ufe0f Message delivery failed after multiple attempts. "
-                    "Please try again \u2014 your request was processed but the response could not be sent.")
+                    t("g36.platform_base.delivery_failed"))
                 try:
                     await _send(notice)
                 except Exception as notify_err:
@@ -3711,7 +3714,7 @@ class BasePlatformAdapter(ABC):
         likely culprit override it (Photon drops rich links instead of adding the banner)."""
         return await self.send(
             chat_id=chat_id, content=self.warning_text(
-                f"(Response formatting failed, plain text:)\n\n{content[:3500]}", content[:3500],
+                t("g36.platform_base.formatting_failed", content=content[:3500]), content[:3500],
                 chat_id=chat_id, metadata=metadata),
             reply_to=reply_to, metadata=metadata)
 
@@ -4318,14 +4321,13 @@ class BasePlatformAdapter(ABC):
         _thread_metadata = None
         try:
             _thread_metadata = _thread_metadata_for_event(event)
-            error_detail = str(e)[:300] if str(e) else "no details available"
+            error_detail = str(e)[:300] if str(e) else t("g36.platform_base.turn_error_no_details")
             # Only the policy reads bind the routed profile; the send stays in the launch scope
             # as before, so delivery bookkeeping keeps landing where boot-time recovery reads it.
             with self._media_delivery_scope(event.source):
                 content = None if diagnostic_wake_muted(event) else self.warning_text(
-                    f"Sorry, I encountered an error ({type(e).__name__}).\n{error_detail}\n"
-                    "Try again or use /reset to start a fresh session.",
-                    "Sorry, I encountered an error.",
+                    t("g36.platform_base.turn_error", error_type=type(e).__name__, detail=error_detail),
+                    t("g36.platform_base.turn_error_short"),
                     logical_platform=event.source.platform, chat_id=event.source.chat_id, metadata=_thread_metadata)
             if content is None:
                 return _thread_metadata

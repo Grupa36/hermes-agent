@@ -37,6 +37,7 @@ from agent.conversation_compression import (
     COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE, IDLE_COMPACTION_STATUS_TEMPLATE,
     PRE_API_COMPRESSION_STATUS_TEMPLATE, PREFLIGHT_COMPRESSION_STATUS_TEMPLATE)
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
+from agent.i18n import t
 from agent.interrupt_compat import request_hard_interrupt
 from agent.turn_context import compression_made_progress
 from agent.session_activity import ActivityProvenance
@@ -198,12 +199,10 @@ def _hygiene_compression_timeout_message(
     """Describe the host timeout that actually ended hygiene compression. Chat users cannot edit
     model config, so the copy names /compress, /new and `hermes doctor`, never a config key or the
     raw second counts (those stay in the gateway log)."""
-    lead = (
-        "⚠️ Shortening the conversation history took too long, so I skipped it and kept "
-        "everything as-is. Run /compress to try again or /new to start fresh.")
+    lead = t("g36.run.hygiene_timeout")
     if total_exhausted:
         return lead
-    return lead + " If this keeps happening, run `hermes doctor` on the host."
+    return lead + t("g36.run.hygiene_timeout_doctor_hint")
 
 
 def _cached_agent_for_hygiene(gateway, session_key: str):
@@ -593,20 +592,20 @@ def _format_exec_approval_fallback(
     the button card (``BasePlatformAdapter._format_exec_approval``), plus the typed ``/approve``
     steps a surface without buttons needs."""
     from gateway.platforms.base_exec_approval import (
-        EA_HEADER_TEXT, EA_REASON_LABEL_TEXT, approval_timeout_seconds, format_approval_deadline_line)
+        approval_timeout_seconds, ea_header_text, ea_reason_label_text, format_approval_deadline_line)
     cmd_preview = command[:200] + "..." if len(command) > 200 else command
-    heading = ("⚠️ **Smart DENY — owner override for one operation:**" if smart_denied
-               else f"⚠️ **{EA_HEADER_TEXT}**")
+    heading = (t("g36.run.approval_smart_deny_heading") if smart_denied
+               else f"⚠️ **{ea_header_text()}**")
 
-    choices = [f"Reply `{command_prefix}approve` to run it once"]
+    choices = [t("g36.run.approval_reply_once", prefix=command_prefix)]
     if not smart_denied and allow_session:
-        choices.append(f"`{command_prefix}approve session` to allow this pattern for the rest of this session")
+        choices.append(t("g36.run.approval_reply_session", prefix=command_prefix))
         if allow_permanent:
-            choices.append(f"`{command_prefix}approve always` to allow it permanently")
-    choices.append(f"`{command_prefix}deny` to cancel")
+            choices.append(t("g36.run.approval_reply_always", prefix=command_prefix))
+    choices.append(t("g36.run.approval_reply_deny", prefix=command_prefix))
     return (
-        f"{heading}\n```\n{cmd_preview}\n```\n{EA_REASON_LABEL_TEXT}: {description}\n\n"
-        + ", ".join(choices[:-1]) + f", or {choices[-1]}.\n"
+        f"{heading}\n```\n{cmd_preview}\n```\n{ea_reason_label_text()}: {description}\n\n"
+        + ", ".join(choices[:-1]) + t("g36.run.approval_reply_or_last", last=choices[-1])
         + format_approval_deadline_line(approval_timeout_seconds()))
 
 # Ordered: rate-limit beats auth beats policy beats connection; first match wins. Rate-limit goes
@@ -634,6 +633,14 @@ _PROVIDER_ERROR_REPLIES = (
                                        "if it persists, run `hermes doctor` on the host."),
     (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ Hermes could not reach the AI model service (no further detail from the "
                                    "SDK). Use /retry to try again; if it persists, run `hermes doctor` on the host."))
+# Fork (i18n): catalog key per reply above, resolved at call time (English text is identical).
+_PROVIDER_ERROR_REPLY_KEYS = {
+    _GATEWAY_RATE_LIMIT_RE: "g36.run.provider_rate_limited",
+    _GATEWAY_AUTH_ERROR_RE: "g36.run.provider_auth_failed",
+    _GATEWAY_PROVIDER_POLICY_RE: "g36.run.provider_policy_rejected",
+    _GATEWAY_CONNECTION_INTERRUPTED_RE: "g36.run.provider_connection_interrupted",
+    _GATEWAY_ENDPOINT_UNREACHABLE_RE: "g36.run.provider_endpoint_unreachable",
+    _GATEWAY_CONNECTION_ERROR_RE: "g36.run.provider_connection_error"}
 
 
 # Shared by the failed-turn normalizer and ``run_turn._hmwa_agent_error_reply``; canonical
@@ -650,19 +657,16 @@ def _rate_limit_reply(text: str) -> str:
     from agent.retry_utils import format_reset_window, reset_delay_from_message
     seconds = reset_delay_from_message(text) or 0
     if seconds < 120:
-        return "⏱️ The AI model service is rate-limiting requests. Wait a moment, then use /retry."
-    return (f"⏱️ The AI model service's usage limit is reached; it resets in {format_reset_window(seconds)}. "
-            "Use /retry after that, or /model to switch models.")
+        return t("g36.run.provider_rate_limited")
+    return t("g36.run.provider_usage_limit_resets", window=format_reset_window(seconds))
 
 
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     for pattern, reply in _PROVIDER_ERROR_REPLIES:
         if pattern.search(text):
-            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else reply
-    return (
-        "⚠️ The AI model service kept failing. Use /retry to try again, or /model to switch "
-        "models. Details are in the gateway log (`hermes logs`).")
+            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else t(_PROVIDER_ERROR_REPLY_KEYS[pattern])
+    return t("g36.run.provider_kept_failing")
 
 
 # Provider/API failure envelope preambles (not ordinary assistant prose), anchored at line start.
@@ -2797,9 +2801,7 @@ def _check_unavailable_skill(command_name: str) -> str | None:
                     continue
                 # disabled is keyed by the declared frontmatter name (what skills.disabled stores).
                 if slug == normalized and declared_name in disabled:
-                    return (
-                        f"The **{command_name}** skill is installed but disabled.\n"
-                        f"Enable it with: `hermes skills config`")
+                    return t("g36.run.skill_disabled", name=command_name)
 
         # Check optional skills (shipped with repo but not installed)
         from hermes_constants import get_optional_skills_dir
@@ -2815,9 +2817,7 @@ def _check_unavailable_skill(command_name: str) -> str | None:
                 # Install path: official/<category>/<name>
                 rel = skill_md.parent.relative_to(optional_dir)
                 install_path = f"official/{'/'.join(rel.parts)}"
-                return (
-                    f"The **{command_name}** skill is available but not installed.\n"
-                    f"Install it with: `hermes skills install {install_path}`")
+                return t("g36.run.skill_not_installed", name=command_name, install_path=install_path)
     except Exception:
         pass
     return None
@@ -2968,7 +2968,7 @@ def _format_concise_process_notification(
     """One-line completion message for ``concise`` display mode; failure appends a short output tail."""
     ok = exit_code in {0, None}
     icon = "✅" if ok else "❌"
-    parts = [f"{icon} Background task {'finished' if ok else 'failed'}"]
+    parts = [t("g36.run.bg_process_finished" if ok else "g36.run.bg_process_failed", icon=icon)]
     short_cmd = _shorten_command_for_display(command)
     if short_cmd:
         parts.append(f"— `{short_cmd}`")
@@ -2982,7 +2982,7 @@ def _format_concise_process_notification(
         else:
             details.append(f"{secs}s")
     if not ok:
-        details.append(f"exit {exit_code}")
+        details.append(t("g36.run.bg_process_exit", code=exit_code))
     if details:
         parts.append(f"({', '.join(details)})")
     text = " ".join(parts)
@@ -2992,9 +2992,9 @@ def _format_concise_process_notification(
         if len(tail) > 500:
             tail = tail[-500:]
         if tail:
-            text += f". Last output:\n```\n{tail}\n```"
+            text += t("g36.run.bg_process_last_output", tail=tail)
     if not ok:
-        text += "\nAsk me to rerun it or show the full log."
+        text += t("g36.run.bg_process_rerun_hint")
     return text
 
 
@@ -3084,22 +3084,13 @@ def _normalize_empty_agent_response(
         failure_reason = str(agent_result.get("failure_reason") or "")
         if failure_reason.startswith("session_persistence_failed") or "session storage" in error_str:
             if failure_reason.endswith(":disk") or "disk" in error_str:
-                return (
-                    "⚠️ Session storage was temporarily unavailable, so this "
-                    "turn was stopped to protect your conversation history. "
-                    "Please check available disk space, then send your message again.")
-            return (
-                "⚠️ Session storage was temporarily unavailable, so this "
-                "turn was stopped to protect your conversation history. "
-                "Your message should already be saved — please send it again in a moment.")
+                return t("g36.run.session_storage_disk")
+            return t("g36.run.session_storage_unavailable")
         if is_overflow:
-            return _CONTEXT_OVERFLOW_REPLY
+            return t("g36.run.context_overflow")
         # Raw exception text (class names, JSON bodies, URLs) stays in the gateway log.
         logger.warning("Agent turn failed; reply sanitized for chat. Detail: %s", str(error_detail)[:500])
-        return (
-            "⚠️ Something went wrong and I couldn't finish this reply. Use /retry to try again, "
-            "or /new to start a fresh conversation. Technical details are in the gateway log "
-            "(`hermes logs`).")
+        return t("g36.run.turn_failed_generic")
 
     api_calls = int(agent_result.get("api_calls", 0) or 0)
     if agent_result.get("interrupted"):
@@ -3116,9 +3107,7 @@ def _normalize_empty_agent_response(
         # (response=0 chars) and the user sees no reply at all. Surface a short retry hint so the message
         # isn't lost in silence. (#31884)
         if api_calls == 0:
-            return (
-                "⚠️ Your message was interrupted before processing started "
-                "(likely by a recent /stop). Please send it again.")
+            return t("g36.run.interrupted_before_start")
         return response
     if api_calls > 0:
         # Hidden-reasoning-only retry exhaustion: the loop's sentinel text ("Codex response remained
@@ -3143,18 +3132,12 @@ def _normalize_empty_agent_response(
                 reason = ""
             else:
                 reason = f": {err[:200]}"
-            return (
-                f"⚠️ I had to stop before finishing{reason}. Use /retry to try again, or /compress "
-                "if this conversation has grown very long.")
-        return (
-            "⚠️ Processing completed but no response was generated. "
-            "This may be a transient error — try sending your message again.")
+            return t("g36.run.stopped_before_finishing", reason=reason)
+        return t("g36.run.no_response_generated")
 
     # api_calls == 0, not failed/interrupted: agent never ran (post-/stop race); don't drop silently.
     if api_calls == 0 and not agent_result.get("partial"):
-        return (
-            "⚠️ Your message wasn't processed (the previous turn was still "
-            "being cleaned up). Please send it again.")
+        return t("g36.run.not_processed_cleanup")
 
     return response
 

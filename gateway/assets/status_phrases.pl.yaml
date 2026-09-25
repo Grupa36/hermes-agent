@@ -1,0 +1,54 @@
+# Polish built-in status phrases (fork). Loaded with mode=replace over the English
+# built-ins when the active i18n language is pl; user catalogs still apply on top.
+status:
+- nadal nad tym siedzę
+- dalej nad tym pracuję
+- to trochę potrwa, nadal działam
+- jeszcze sprawdzam
+- nie zawiesiłem się, po prostu to trwa
+- czekam na wolniejszą część
+- żyję, dalej pracuję
+- daję temu dokończyć
+- nadal to przetwarzam
+- chwila, to jeszcze trwa
+- idzie do przodu
+- czekam na wynik
+- jestem, sprawdzam
+- wolniejsza część wciąż trwa
+- dalej szukam sensownej odpowiedzi
+- jeszcze nie ma wyniku, czekam
+- sprawdzanie jeszcze trwa
+- czekam na backend
+- to zajmie minutkę
+- dalej działam
+- nadal pracuję, nie zawiesiłem się
+- czekam na coś konkretnego
+- dalej to przerabiam
+- sekunda, dłuższy etap jeszcze trwa
+- wciąż czekam na wynik
+- przechodzę przez wolniejszy krok
+- trwa to dłużej niż zwykle
+- nadal sprawdzam, spokojnie
+- w toku
+- czekam, aż to się skończy
+generic:
+- już się tym zajmuję
+- sekunda
+- już sprawdzam
+- daj mi chwilę
+- patrzę na to
+- ogarniam to
+- sprawdzam
+- pracuję nad tym
+- moment
+- rzucam okiem
+- jasne, sprawdzam
+- daj mi moment
+- już patrzę
+- ogarniam
+- szukam tego, co ważne
+- sekunda, działam
+- przyglądam się dokładnie
+- sprawdzam szczegóły
+- rozkminiam to
+- jeszcze szukam

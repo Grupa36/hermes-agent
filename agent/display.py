@@ -564,6 +564,22 @@ def verb_drops_preview(tool_name: str) -> bool:
     return tool_name in _TOOL_VERBS_NO_PREVIEW
 
 
+def _localized_status_verb(tool_name: str, verb: str | None, phrase: str) -> tuple[str, str]:
+    """Fork: (phrase, connector) from the ``g36.display.*`` catalog for non-English languages;
+    English (and any tool without a catalog entry) keeps the built-in wording."""
+    from agent.i18n import get_language, t
+    connector = tool_verb_connector(tool_name)
+    if get_language() == "en":
+        return phrase, connector
+    key = f"g36.display.status_verb.{tool_name}" if verb else "g36.display.status_using"
+    localized = t(key, tool=tool_name) if not verb else t(key)
+    if localized == key:
+        return phrase, connector
+    if connector != " ":
+        connector = t("g36.display.status_connector_for")
+    return localized, connector
+
+
 def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) -> str | None:
     """Lowercase "is <verb> <preview>…" phrase following the bot's display name (Slack setStatus).
 
@@ -575,10 +591,11 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
         return None
     verb = _TOOL_VERBS.get(tool_name)
     phrase = f"is {verb[0].lower()}{verb[1:]}" if verb else f"is using {tool_name}"
+    phrase, connector = _localized_status_verb(tool_name, verb, phrase)  # fork: i18n
     with_preview = args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW
     preview = build_tool_preview(tool_name, args, max_len=None) if with_preview else None
     if preview:  # previews can contain newlines (terminal commands); keep the first line
-        phrase = f"{phrase}{tool_verb_connector(tool_name)}{preview.splitlines()[0].strip()}"
+        phrase = f"{phrase}{connector}{preview.splitlines()[0].strip()}"
     return phrase[: max_len - 2].rstrip() + "…" if len(phrase) > max_len - 1 else phrase + "…"
 
 

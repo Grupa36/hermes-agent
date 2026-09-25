@@ -47,9 +47,7 @@ def _model_switch_skew_guard() -> Optional[str]:
     return t(
         "gateway.model.error_prefix",
         error=(
-            f"This gateway is running code from {boot_rev} but the checkout on "
-            f"disk is now {disk_rev}. Switching models would risk a stale-module "
-            f"crash — restart the gateway to load the new code: hermes gateway restart"
+            t("g36.slash_commands_model.code_skew", boot_rev=boot_rev, disk_rev=disk_rev)
         ),
     )
 
@@ -189,7 +187,7 @@ class GatewayModelCommandsMixin:
             )
             return t(
                 "gateway.model.error_prefix",
-                error=f"Model switch to {result.new_model} failed ({exc}); staying on {ctx.current_model}.",
+                error=t("g36.slash_commands_model.switch_failed", model=result.new_model, error=exc, current=ctx.current_model),
             )
         return None
 
@@ -252,7 +250,7 @@ class GatewayModelCommandsMixin:
                 await _persist_model_switch_to_config(result, ctx.config_path)
             except Exception as e:
                 logger.warning("Failed to persist model switch: %s", e)
-                global_error = f"config.yaml not updated ({str(e) or type(e).__name__})"
+                global_error = t("g36.slash_commands_model.config_not_updated", error=str(e) or type(e).__name__)
         # Precedence is session > channel_overrides > config.yaml: in a chat with a channel_overrides
         # model/provider the session override must stay, or the next turn runs the channel model.
         if ctx.persist_global and global_error is None and self._channel_override_for(source) is None:
@@ -261,7 +259,7 @@ class GatewayModelCommandsMixin:
             except Exception as e:
                 # Store still holds the stale copy: keep memory in agreement and report it (#100314).
                 logger.warning("Failed to clear persisted session model override: %s", e)
-                global_error = f"saved to config.yaml, but the stale session override was not cleared ({e})"
+                global_error = t("g36.slash_commands_model.stale_override_not_cleared", error=e)
             else:
                 self._session_model_overrides.pop(ctx.session_key, None)
         # Non-secret write-through so the override survives a restart (api_key/api_mode are
@@ -334,7 +332,7 @@ class GatewayModelCommandsMixin:
         elif ctx.persist_global:
             lines.append(t("gateway.model.saved_global"))
         elif one_turn:
-            lines.append("    (next turn only — restores after one response)")
+            lines.append(t("g36.slash_commands_model.next_turn_only"))
         else:
             lines.append(t("gateway.model.session_only_hint"))
         return "\n".join(lines)
@@ -483,14 +481,13 @@ class GatewayModelCommandsMixin:
 
         async def _on_cost_confirm(choice: str) -> str:
             if choice == "cancel":
-                return f"🟡 Model switch cancelled. Current model unchanged ({ctx.current_model or 'unknown'})."
+                return t("g36.slash_commands_model.switch_cancelled", model=ctx.current_model or 'unknown')
             # "once" and "always" both proceed — selection guards have no persistent opt-out.
             return await self._commit_model_switch(result, ctx, source=ctx.source)
 
         _p = self._typed_command_prefix_for(event.source.platform)
         message = (
-            f"⚠️ **{warning.title}**\n\n{warning.message}\n\n"
-            f"_Text fallback: reply `{_p}approve` to switch or `{_p}cancel` to keep the current model._"
+            t("g36.slash_commands_model.guard_prompt", title=warning.title, message=warning.message, prefix=_p)
         )
         return True, await self._request_slash_confirm(
             event=event, command="model", title=warning.title, message=message, handler=_on_cost_confirm,
@@ -570,7 +567,7 @@ class GatewayModelCommandsMixin:
         try:
             from hermes_cli.config import load_config, save_config
         except Exception as exc:
-            return f"❌ Could not load config: {exc}"
+            return t("g36.slash_commands_model.config_load_failed", error=exc)
         result = crs.apply(
             load_config(), new_value, persist_callback=(save_config if new_value is not None else None),
         )
@@ -616,7 +613,7 @@ class GatewayModelCommandsMixin:
         # Persists the selection only (never agent.system_prompt, a user-owned overlay) into the
         # routed profile's config.yaml; the next turn re-resolves the prompt — no process-global state.
         if not persist_personality(name):
-            return t("gateway.personality.save_failed", error="config write failed")
+            return t("gateway.personality.save_failed", error=t("g36.slash_commands_model.config_write_failed"))
         if not name:
             return t("gateway.personality.cleared")
         return t("gateway.personality.set_to", name=name)

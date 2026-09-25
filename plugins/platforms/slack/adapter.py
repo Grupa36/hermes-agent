@@ -34,6 +34,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from agent.retry_utils import parse_retry_after_seconds
+from agent.i18n import t
 from agent.secret_scope import get_secret
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import (
@@ -42,7 +43,7 @@ from gateway.platforms._shared import (
     platform_gate_env as _scoped_gate_env, send_error
 )
 from gateway.platforms.helpers import MessageDeduplicator
-from gateway.platforms.base_exec_approval import EA_HEADER_TEXT
+from gateway.platforms.base_exec_approval import ea_header_text
 from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, ExecApprovalPrompt,
     SendResult, SUPPORTED_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, _TEXT_INJECT_EXTENSIONS,
@@ -76,7 +77,7 @@ _MODEL_PICKER_CANCEL_ACTION = "hermes_model_cancel"
 # Rendered when a live-looking picker message can no longer resolve (gateway
 # restart, aged-out state entry, or a value the stored state no longer
 # covers): the message is rewritten to this so the control visibly dies.
-_MODEL_PICKER_EXPIRED_NOTICE = "⏳ This model picker expired — please run /model again."
+_MODEL_PICKER_EXPIRED_NOTICE = "g36.slack.model_picker_expired"  # i18n key; t() at use site
 _MODEL_PICKER_ACTION_IDS = (
     _MODEL_PICKER_PROVIDER_ACTION,
     _MODEL_PICKER_MODEL_ACTION,
@@ -1498,8 +1499,7 @@ class SlackAdapter(BasePlatformAdapter):
             dropped = len(chunks) - 5
             chunks = chunks[:5]
             chunks[-1] = (
-                chunks[-1].rstrip() + f"\n\n_[Reply truncated: {dropped} more part(s) exceeded "
-                "Slack's ephemeral reply limit.]_")
+                chunks[-1].rstrip() + t("g36.slack.reply_truncated", dropped=dropped))
         try:
             async with aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
                 for idx, chunk in enumerate(chunks):
@@ -1672,7 +1672,7 @@ class SlackAdapter(BasePlatformAdapter):
         @self._app.command(_slash_pattern)
         async def handle_hermes_command(ack, command):
             slash = (command.get("command") or "").lstrip("/")
-            await ack(response_type="ephemeral", text=f"Running `/{slash}`…")
+            await ack(response_type="ephemeral", text=t("g36.slack.slash_running", slash=slash))
             await self._handle_slash_command(command)
 
         # Approval buttons, slash-confirm buttons (tools/slash_confirm.py), feedback.
@@ -1887,7 +1887,7 @@ class SlackAdapter(BasePlatformAdapter):
             client = self._get_client(parent_chat_id)
             if client is None:
                 return None
-            seed_text = f":thread: Hermes handoff — *{(name or 'session').strip()[:80]}*"
+            seed_text = t("g36.slack.handoff_seed", name=(name or 'session').strip()[:80])
             result = await client.chat_postMessage(channel=parent_chat_id, text=seed_text)
             ts = _slack_response_payload(result).get("ts")
             return str(ts) if ts else None
@@ -2770,9 +2770,9 @@ class SlackAdapter(BasePlatformAdapter):
         as stuck (live-status phrases and ``typing_status_text`` always win over this)."""
         elapsed = int(time.monotonic() - started) if started is not None else 0
         if elapsed < 30:
-            return "is thinking..."
+            return t("g36.slack.status_thinking")
         mins, secs = divmod(elapsed, 60)
-        return f"still working… ({f'{mins}m{secs:02d}s' if mins else f'{secs}s'})"
+        return t("g36.slack.status_still_working", elapsed=f'{mins}m{secs:02d}s' if mins else f'{secs}s')
 
     async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Clear the assistant thread status indicator."""
@@ -3111,12 +3111,12 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "feedback_buttons",
                     "action_id": "hermes_feedback",
                     "positive_button": {
-                        "text": {"type": "plain_text", "text": "Good Response"},
-                        "accessibility_label": ("Submit positive feedback on this response"),
+                        "text": {"type": "plain_text", "text": t("g36.slack.feedback_good")},
+                        "accessibility_label": (t("g36.slack.feedback_good_a11y")),
                         "value": "positive"},
                     "negative_button": {
-                        "text": {"type": "plain_text", "text": "Bad Response"},
-                        "accessibility_label": ("Submit negative feedback on this response"),
+                        "text": {"type": "plain_text", "text": t("g36.slack.feedback_bad")},
+                        "accessibility_label": (t("g36.slack.feedback_bad_a11y")),
                         "value": "negative"}}]}
 
     def _append_feedback_block(self, blocks: Optional[list]) -> Optional[list]:
@@ -3448,7 +3448,7 @@ class SlackAdapter(BasePlatformAdapter):
                 "[%s] Failed to send local Slack image %s: %s", self.name, image_path, e, exc_info=True
             )
             return await self._send_failure_notice(
-                chat_id, caption, "⚠️ Couldn't deliver the image attachment.", reply_to, metadata)
+                chat_id, caption, t("g36.slack.image_undelivered"), reply_to, metadata)
 
     async def _send_failure_notice(
         self, chat_id: str, caption: Optional[str], notice: str, reply_to: Optional[str],
@@ -3517,7 +3517,7 @@ class SlackAdapter(BasePlatformAdapter):
         """Send a video file to Slack."""
         return await self._send_local_file(
             chat_id, video_path, caption, reply_to, metadata, "video", os.path.basename(video_path),
-            f"Video file not found: {video_path}", "⚠️ Couldn't deliver the video attachment.")
+            f"Video file not found: {video_path}", t("g36.slack.video_undelivered"))
 
     async def send_document(
         self, chat_id: str, file_path: str, caption: Optional[str] = None,
@@ -3528,7 +3528,7 @@ class SlackAdapter(BasePlatformAdapter):
         display_name = file_name or os.path.basename(file_path)
         return await self._send_local_file(
             chat_id, file_path, caption, reply_to, metadata, "document", display_name,
-            f"File not found: {file_path}", f"⚠️ Couldn't deliver the file attachment ({display_name}).",
+            f"File not found: {file_path}", t("g36.slack.file_undelivered", name=display_name),
         )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -4935,10 +4935,10 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error("[Slack] %s failed: %s", label, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
-    _EA_HEADER = f":warning: *{EA_HEADER_TEXT}*\n"
+    _EA_HEADER = property(lambda self: f":warning: *{ea_header_text()}*\n")
     _EA_CODE_OPEN = "```"
     _EA_CODE_CLOSE = "```\n"
-    _EA_SMART_DENY_LINE = "\n*Smart DENY:* owner override applies to this one operation only."
+    _EA_SMART_DENY_LINE = property(lambda self: t("g36.slack.ea_smart_deny_line"))
     _EA_REASON_BUDGET = 500
     _EA_SECTION_CAP = 3000  # a longer section text → invalid_blocks → no buttons at all
     _EA_ACTION_IDS = {"once": "hermes_approve_once", "session": "hermes_approve_session",
@@ -4962,7 +4962,7 @@ class SlackAdapter(BasePlatformAdapter):
             blocks = [
                 {"type": "section", "text": {"type": "mrkdwn", "text": prompt.text}},
                 {"type": "actions", "elements": actions}]
-            return f"⚠️ Command approval required: {prompt.command[:100]}", blocks
+            return t("g36.slack.approval_required_fallback", command=prompt.command[:100]), blocks
 
         return await self._send_interactive_prompt(
             prompt.chat_id, prompt.metadata, _build, "send_exec_approval",
@@ -4976,7 +4976,7 @@ class SlackAdapter(BasePlatformAdapter):
         def _build() -> Tuple[str, list]:
             # Same 3000-char section cap as send_exec_approval: budget the body
             # against the rendered title.
-            _title = (title or "Confirm")[:150]
+            _title = (title or t("g36.slack.confirm_title"))[:150]
             budget = 3000 - len(f"*{_title}*\n\n") - len("...")
             body = message[:budget] + "..." if len(message) > budget else message
             # session_key|confirm_id in the button value lets the callback resolve
@@ -4987,10 +4987,10 @@ class SlackAdapter(BasePlatformAdapter):
                 {
                     "type": "actions",
                     "elements": [
-                        self._button("Approve Once", "hermes_confirm_once", value, style="primary"),
-                        self._button("Always Approve", "hermes_confirm_always", value),
-                        self._button("Cancel", "hermes_confirm_cancel", value, style="danger")]}]
-            return f"{title or 'Confirm'}: {body[:100]}", blocks
+                        self._button(t("g36.slack.button_approve_once"), "hermes_confirm_once", value, style="primary"),
+                        self._button(t("g36.slack.button_always_approve"), "hermes_confirm_always", value),
+                        self._button(t("g36.slack.button_cancel"), "hermes_confirm_cancel", value, style="danger")]}]
+            return f"{title or t('g36.slack.confirm_title')}: {body[:100]}", blocks
 
         return await self._send_interactive_prompt(chat_id, metadata, _build, "send_slash_confirm")
 
@@ -5009,19 +5009,18 @@ class SlackAdapter(BasePlatformAdapter):
         for idx, p in enumerate(providers[:100]):
             count = p.get("total_models", len(p.get("models", [])))
             options.append({
-                "text": {"type": "plain_text", "text": f"{p['name']} ({count} models)"[:75], "emoji": True},
+                "text": {"type": "plain_text", "text": t("g36.slack.picker_provider_option", name=p['name'], count=count)[:75], "emoji": True},
                 "value": str(idx),
             })
         extra = (
-            f"\n*{len(providers) - 100} more available — type `/model <name>` directly*"
+            t("g36.slack.picker_more_available", count=len(providers) - 100)
             if len(providers) > 100
             else ""
         )
         section_text = (
-            f"*⚙ Model Configuration*\n"
-            f"Current model: `{current_model or 'unknown'}`\n"
-            f"Provider: {provider_label}\n\n"
-            f"Select a provider:{extra}"
+            t("g36.slack.picker_provider_section",
+              model=current_model or t("g36.slack.picker_unknown_model"),
+              provider=provider_label, extra=extra)
         )
         return [
             {"type": "section", "text": {"type": "mrkdwn", "text": section_text[:3000]}},
@@ -5030,13 +5029,13 @@ class SlackAdapter(BasePlatformAdapter):
                 "elements": [
                     {
                         "type": "static_select",
-                        "placeholder": {"type": "plain_text", "text": "Choose a provider…", "emoji": True},
+                        "placeholder": {"type": "plain_text", "text": t("g36.slack.picker_choose_provider"), "emoji": True},
                         "action_id": _MODEL_PICKER_PROVIDER_ACTION,
                         "options": options,
                     },
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                        "text": {"type": "plain_text", "text": t("g36.slack.button_cancel"), "emoji": True},
                         "style": "danger",
                         "action_id": _MODEL_PICKER_CANCEL_ACTION,
                         "value": "cancel",
@@ -5066,15 +5065,15 @@ class SlackAdapter(BasePlatformAdapter):
             })
         total = (provider or {}).get("total_models", len(models))
         extra = (
-            f"\n*{total - len(models)} more available — type `/model <name>` directly*"
+            t("g36.slack.picker_more_available", count=total - len(models))
             if total > len(models)
             else ""
         )
-        section_text = f"*⚙ Model Configuration*\n\nProvider: *{pname}*\nSelect a model:{extra}"
+        section_text = t("g36.slack.picker_model_section", provider=pname, extra=extra)
         elements = [
             {
                 "type": "static_select",
-                "placeholder": {"type": "plain_text", "text": f"Choose a model from {pname}…"[:150], "emoji": True},
+                "placeholder": {"type": "plain_text", "text": t("g36.slack.picker_choose_model", provider=pname)[:150], "emoji": True},
                 "action_id": _MODEL_PICKER_MODEL_ACTION,
                 "options": options,
             },
@@ -5082,13 +5081,13 @@ class SlackAdapter(BasePlatformAdapter):
         if provider_slug:
             elements.append({
                 "type": "button",
-                "text": {"type": "plain_text", "text": "◀ Back", "emoji": True},
+                "text": {"type": "plain_text", "text": t("g36.slack.picker_back"), "emoji": True},
                 "action_id": _MODEL_PICKER_BACK_ACTION,
                 "value": provider_slug,
             })
         elements.append({
             "type": "button",
-            "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+            "text": {"type": "plain_text", "text": t("g36.slack.button_cancel"), "emoji": True},
             "style": "danger",
             "action_id": _MODEL_PICKER_CANCEL_ACTION,
             "value": "cancel",
@@ -5139,7 +5138,7 @@ class SlackAdapter(BasePlatformAdapter):
 
             kwargs: Dict[str, Any] = {
                 "channel": chat_id,
-                "text": "⚙ Model Configuration — select a provider",
+                "text": t("g36.slack.picker_select_provider_fallback"),
                 "blocks": sanitize_blocks(blocks),
             }
             if thread_ts:
@@ -5240,7 +5239,7 @@ class SlackAdapter(BasePlatformAdapter):
             # control visibly instead of silently swallowing clicks
             # (mirrors the clarify handler's expiry notice).
             await self._update_picker_message(
-                channel_id, team_id, msg_ts, _MODEL_PICKER_EXPIRED_NOTICE
+                channel_id, team_id, msg_ts, t(_MODEL_PICKER_EXPIRED_NOTICE)
             )
             return
 
@@ -5251,7 +5250,7 @@ class SlackAdapter(BasePlatformAdapter):
         if action_id == _MODEL_PICKER_CANCEL_ACTION:
             self._model_picker_state.pop(marker, None)
             await self._update_picker_message(
-                channel_id, team_id, msg_ts, "❌ Model selection cancelled."
+                channel_id, team_id, msg_ts, t("g36.slack.picker_cancelled")
             )
             return
 
@@ -5273,14 +5272,14 @@ class SlackAdapter(BasePlatformAdapter):
                 logger.warning("[Slack] Invalid provider picker index token: %r", idx_token)
                 self._model_picker_state.pop(marker, None)
                 await self._update_picker_message(
-                    channel_id, team_id, msg_ts, _MODEL_PICKER_EXPIRED_NOTICE
+                    channel_id, team_id, msg_ts, t(_MODEL_PICKER_EXPIRED_NOTICE)
                 )
                 return
             provider_slug = provider.get("slug", "")
             if not provider.get("models"):
                 await self._update_picker_message(
                     channel_id, team_id, msg_ts,
-                    f"No models available for `{provider_slug}`.",
+                    t("g36.slack.picker_no_models", provider=provider_slug),
                 )
                 self._model_picker_state.pop(marker, None)
                 return
@@ -5292,7 +5291,7 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._get_client(channel_id, team_id=team_id or None).chat_update(
                     channel=channel_id,
                     ts=msg_ts,
-                    text=f"⚙ Model Configuration — {provider.get('name', provider_slug)}",
+                    text=t("g36.slack.picker_provider_fallback", provider=provider.get('name', provider_slug)),
                     blocks=sanitize_blocks(blocks),
                 )
             except Exception as e:
@@ -5317,7 +5316,7 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._get_client(channel_id, team_id=team_id or None).chat_update(
                     channel=channel_id,
                     ts=msg_ts,
-                    text="⚙ Model Configuration — select a provider",
+                    text=t("g36.slack.picker_select_provider_fallback"),
                     blocks=sanitize_blocks(blocks),
                 )
             except Exception as e:
@@ -5342,21 +5341,21 @@ class SlackAdapter(BasePlatformAdapter):
                 logger.warning("[Slack] Invalid model picker index token: %r", idx_token)
                 self._model_picker_state.pop(marker, None)
                 await self._update_picker_message(
-                    channel_id, team_id, msg_ts, _MODEL_PICKER_EXPIRED_NOTICE
+                    channel_id, team_id, msg_ts, t(_MODEL_PICKER_EXPIRED_NOTICE)
                 )
                 return
 
             if not on_model_selected:
                 self._model_picker_state.pop(marker, None)
                 await self._update_picker_message(
-                    channel_id, team_id, msg_ts, _MODEL_PICKER_EXPIRED_NOTICE
+                    channel_id, team_id, msg_ts, t(_MODEL_PICKER_EXPIRED_NOTICE)
                 )
                 return
 
             # Pop the state up-front (double-click guard, mirrors approval).
             self._model_picker_state.pop(marker, None)
             await self._update_picker_message(
-                channel_id, team_id, msg_ts, f"⚙ Switching to `{model_id}`…"
+                channel_id, team_id, msg_ts, t("g36.slack.picker_switching", model=model_id)
             )
 
             switch_failed = False
@@ -5378,10 +5377,10 @@ class SlackAdapter(BasePlatformAdapter):
                     switch_failed = True
             except Exception as exc:
                 logger.error("[Slack] Model picker callback failed: %s", exc, exc_info=True)
-                confirmation = f"❌ Model switch failed: {exc}"
+                confirmation = t("g36.slack.picker_switch_failed", error=exc)
                 switch_failed = True
 
-            header = "⚙ Model Switch Failed" if switch_failed else "⚙ Model Switched"
+            header = t("g36.slack.picker_header_failed") if switch_failed else t("g36.slack.picker_header_switched")
             await self._update_picker_message(
                 channel_id, team_id, msg_ts, f"{header}\n\n{confirmation}"
             )
@@ -5410,13 +5409,13 @@ class SlackAdapter(BasePlatformAdapter):
             # chunk anyway so larger lists degrade gracefully instead of 400ing.
             elements = []
             for idx, choice in enumerate(choices):
-                label = str(choice).strip() or f"Option {idx + 1}"
+                label = str(choice).strip() or t("g36.slack.clarify_option", n=idx + 1)
                 elements.append(
                     self._button(
                         label[:75], f"hermes_clarify_choice_{idx}",
                         f"{clarify_id}|{idx}", emoji=True))
             elements.append(
-                self._button("✏️ Other…", "hermes_clarify_other", f"{clarify_id}|other", emoji=True)
+                self._button(t("g36.slack.clarify_other"), "hermes_clarify_other", f"{clarify_id}|other", emoji=True)
             )
             blocks: list = [{"type": "section", "text": {"type": "mrkdwn", "text": body}}]
             for start in range(0, len(elements), 5):
@@ -5543,14 +5542,14 @@ class SlackAdapter(BasePlatformAdapter):
         "hermes_approve_once": "once", "hermes_approve_session": "session",
         "hermes_approve_always": "always", "hermes_deny": "deny"}
     _APPROVAL_DECISIONS: ClassVar[Dict[str, str]] = {
-        "once": "✅ Approved once by {user}", "session": "✅ Approved for session by {user}",
-        "always": "✅ Approved permanently by {user}", "deny": "❌ Denied by {user}"}
+        "once": "g36.slack.approved_once_by", "session": "g36.slack.approved_session_by",
+        "always": "g36.slack.approved_always_by", "deny": "g36.slack.denied_by"}  # i18n keys
     _CONFIRM_CHOICES: ClassVar[Dict[str, str]] = {
         "hermes_confirm_once": "once", "hermes_confirm_always": "always",
         "hermes_confirm_cancel": "cancel"}
     _CONFIRM_DECISIONS: ClassVar[Dict[str, str]] = {
-        "once": "✅ Approved once by {user}", "always": "🔒 Always approved by {user}",
-        "cancel": "❌ Cancelled by {user}"}
+        "once": "g36.slack.approved_once_by", "always": "g36.slack.always_approved_by",
+        "cancel": "g36.slack.cancelled_by"}  # i18n keys
 
     async def _handle_slash_confirm_action(self, ack, body, action) -> None:
         """Handle a slash-confirm button click from Block Kit."""
@@ -5563,10 +5562,10 @@ class SlackAdapter(BasePlatformAdapter):
             return
         session_key, confirm_id = value.split("|", 1)
         choice = self._CONFIRM_CHOICES.get(action_id, "cancel")
-        decision_text = self._CONFIRM_DECISIONS[choice].format(user=user_name)
+        decision_text = t(self._CONFIRM_DECISIONS[choice], user=user_name)
         await self._finalize_interactive_message(
             channel_id, msg_ts, self._section_text(message), decision_text,
-            "Confirmation prompt", "slash-confirm", team_id or None)
+            t("g36.slack.placeholder_confirmation"), "slash-confirm", team_id or None)
         try:
             from tools import slash_confirm as _slash_confirm_mod
             result_text = await _slash_confirm_mod.resolve(session_key, confirm_id, choice)
@@ -5620,20 +5619,20 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
             count = 0
-        decision_text = self._APPROVAL_DECISIONS[choice].format(user=user_name)
+        decision_text = t(self._APPROVAL_DECISIONS[choice], user=user_name)
         if not count:
             decision_text = (
-                "⌛ Approval expired — command was not run (already timed out or resolved elsewhere)"
+                t("g36.slack.approval_expired")
             )
         await self._finalize_interactive_message(
             channel_id, msg_ts, self._section_text(message), decision_text,
-            "Command approval request", "approval", team_id or None)
+            t("g36.slack.placeholder_approval"), "approval", team_id or None)
 
     async def _update_clarify_message(
         self, channel_id: str, msg_ts: str, question_text: str, decision_text: str) -> None:
         """Rewrite a clarify message to show the outcome and drop the buttons."""
         await self._finalize_interactive_message(
-            channel_id, msg_ts, question_text, decision_text, "Clarification", "clarify", sanitize=False
+            channel_id, msg_ts, question_text, decision_text, t("g36.slack.placeholder_clarify"), "clarify", sanitize=False
         )
 
     async def retire_clarify_card(self, clarify_id: str, notice: str) -> None:
@@ -5669,7 +5668,7 @@ class SlackAdapter(BasePlatformAdapter):
         from tools import clarify_gateway as _clarify_mod
         # "Other" → text-capture mode: mark_awaiting_text flips the entry and the
         # gateway's text-intercept resolves it from the user's next message.
-        expired_text = f"⏳ This prompt expired — please send a new request. (by {user_name})"
+        expired_text = t("g36.slack.clarify_expired_by", user=user_name)
         if action_id == "hermes_clarify_other" or token == "other":
             if not _clarify_mod.mark_awaiting_text(clarify_id):
                 # Entry evicted/gateway restarted — a typed answer would go nowhere.
@@ -5679,7 +5678,7 @@ class SlackAdapter(BasePlatformAdapter):
             # Not terminal: the clarify stays pending for typed text, so keep the card entry —
             # the gateway still has to retire it on timeout / reset / typed answer.
             await self._update_clarify_message(
-                channel_id, msg_ts, original_text, f"✏️ Awaiting typed answer from {user_name}…")
+                channel_id, msg_ts, original_text, t("g36.slack.clarify_awaiting_typed", user=user_name))
             return
         try:
             idx = int(token)
