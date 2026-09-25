@@ -182,6 +182,13 @@ def _principal_matches_allowlist(source, user_id: str, allowed_ids: set) -> bool
         hex_user = _npub_to_hex(user_id) if user_id.startswith("npub") else None
         if hex_user:
             check_ids.add(hex_user)
+    if platform_value == "email":
+        uid_lower = user_id.lower()
+        for allowed in allowed_ids:
+            allowed_lower = str(allowed).lower()
+            if (allowed_lower.startswith("@") and uid_lower.endswith(allowed_lower)) or \
+               (allowed_lower.startswith("*@") and uid_lower.endswith(allowed_lower[1:])):
+                return True
     return bool(check_ids & allowed_ids)
 
 
