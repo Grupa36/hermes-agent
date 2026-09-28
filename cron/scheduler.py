@@ -35,6 +35,13 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 # `hermes update`) otherwise fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# hermes_bootstrap activates PM dependencies (e.g. ruamel.yaml) before application imports.
+try:
+    import hermes_bootstrap  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "hermes_bootstrap":
+        raise
+
 from hermes_constants import get_hermes_home, hermes_home_key
 from cron.env_settings import cron_env_setting
 from hermes_cli._subprocess_compat import windows_hide_flags
